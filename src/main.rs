@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use argon2::{
-    Argon2,
+    Argon2, PasswordHash, PasswordVerifier,
     password_hash::{self, PasswordHasher, SaltString, rand_core::OsRng},
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
@@ -13,7 +13,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
-struct CreateUserInfo {
+struct UserProvidedInfo {
     username: String,
     password: String,
 }
@@ -75,40 +75,26 @@ impl User {
         }
     }
 
-    async fn verify_password(
-        username: String,
-        pass_hash: String,
-        pool: Pool<Postgres>,
-    ) -> Result<Option<Self>, Error> {
-        let user = sqlx::query_as::<_, User>(
-            "
-        SELECT *
-        FROM users
-        WHERE username = $1
-        AND pass_hash = $2;
-        ",
-        )
-        .bind(username)
-        .bind(pass_hash)
-        .fetch_optional(&pool)
-        .await;
-
-        match user {
-            Ok(optional_user) => Ok(optional_user),
-            Err(e) => Err(e),
+    async fn verify_password(&self, password: &[u8]) -> Result<(), Error> {
+        match Argon2::default()
+            .verify_password(password, &PasswordHash::new(&self.pass_hash).unwrap())
+            .is_ok()
+        {
+            true => Ok(()),
+            false => Err(Error::RowNotFound),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, sqlx::FromRow)]
-struct Session {
-    id: Uuid,
-    user_id: Uuid,
-    session_token: Vec<u8>,
-    pass_hash: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
+// #[derive(Serialize, Deserialize, sqlx::FromRow)]
+// struct Session {
+//     id: Uuid,
+//     user_id: Uuid,
+//     session_token: Vec<u8>,
+//     pass_hash: String,
+//     created_at: DateTime<Utc>,
+//     updated_at: DateTime<Utc>,
+// }
 
 #[tokio::main]
 async fn main() {
@@ -129,6 +115,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/register", post(register))
+        .route("/login", post(login))
         .layer(TraceLayer::new_for_http())
         .with_state(pool);
 
@@ -136,9 +123,33 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+async fn login(
+    State(pool): State<PgPool>,
+    Json(payload): Json<UserProvidedInfo>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let user = match User::find_by_username(payload.username, pool.clone())
+        .await
+        .unwrap()
+    {
+        Some(user) => user,
+        None => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Wrong username or password".to_string(),
+            ));
+        }
+    };
+
+    user.verify_password(&payload.password.into_bytes())
+        .await
+        .unwrap();
+
+    Ok(Json(json!(user)))
+}
+
 async fn register(
     State(pool): State<PgPool>,
-    Json(payload): Json<CreateUserInfo>,
+    Json(payload): Json<UserProvidedInfo>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let phc = hash_password(&payload.password).unwrap();
 
@@ -151,7 +162,7 @@ async fn register(
 
 fn hash_password(password: &str) -> Result<String, password_hash::Error> {
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default(); // later you can tune params
+    let argon2 = Argon2::default(); // TODO: Tune params
     Ok(argon2
         .hash_password(password.as_bytes(), &salt)?
         .to_string())
