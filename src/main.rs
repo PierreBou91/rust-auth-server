@@ -1,14 +1,20 @@
+// Error handling
+// from Jeremy Chone excellent video on error handling
+// https://www.youtube.com/watch?v=j-VQCYP7wyw
+pub type Result<T> = std::result::Result<T, Error>;
+pub type Error = Box<dyn std::error::Error>;
+
 use std::time::Duration;
 
 use argon2::{
     Argon2, PasswordHash, PasswordVerifier,
-    password_hash::{self, PasswordHasher, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Error, PgPool, Pool, Postgres, postgres::PgPoolOptions};
+use sqlx::{PgPool, Pool, Postgres, postgres::PgPoolOptions};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -28,11 +34,7 @@ struct User {
 }
 
 impl User {
-    async fn create(
-        username: String,
-        pass_hash: String,
-        pool: Pool<Postgres>,
-    ) -> Result<Self, Error> {
+    async fn create(username: String, pass_hash: String, pool: Pool<Postgres>) -> Result<Self> {
         let user = sqlx::query_as::<_, User>(
             "
         INSERT INTO
@@ -44,19 +46,13 @@ impl User {
         .bind(username)
         .bind(pass_hash)
         .fetch_one(&pool)
-        .await;
+        .await?;
 
         // TODO: Error handling - currently returning sqlx error for simplicity, but we should wrap with our own error type or other error handling
-        match user {
-            Ok(user) => Ok(user),
-            Err(e) => Err(e),
-        }
+        Ok(user)
     }
 
-    async fn find_by_username(
-        username: String,
-        pool: Pool<Postgres>,
-    ) -> Result<Option<Self>, Error> {
+    async fn find_by_username(username: String, pool: Pool<Postgres>) -> Result<Option<Self>> {
         let user = sqlx::query_as::<_, User>(
             "
         SELECT *
@@ -66,22 +62,18 @@ impl User {
         )
         .bind(username)
         .fetch_optional(&pool)
-        .await;
+        .await?;
 
         // TODO: Error handling - currently returning sqlx error for simplicity, but we should wrap with our own error type or other error handling
-        match user {
-            Ok(optional_user) => Ok(optional_user),
-            Err(e) => Err(e),
-        }
+        Ok(user)
     }
 
-    async fn verify_password(&self, password: &[u8]) -> Result<(), Error> {
-        match Argon2::default()
-            .verify_password(password, &PasswordHash::new(&self.pass_hash).unwrap())
-            .is_ok()
-        {
+    async fn verify_password(&self, password: &[u8]) -> Result<()> {
+        let parsed = PasswordHash::new(&self.pass_hash)
+            .map_err(|e| format!("Invalid password hash: {:}", e))?;
+        match Argon2::default().verify_password(password, &parsed).is_ok() {
             true => Ok(()),
-            false => Err(Error::RowNotFound),
+            false => Err("Invalid password".into()),
         }
     }
 }
@@ -97,7 +89,7 @@ impl User {
 // }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     // RUST_LOG=debug cargo run
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -110,8 +102,7 @@ async fn main() {
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(3))
         .connect(&db_url)
-        .await
-        .unwrap();
+        .await?;
 
     let app = Router::new()
         .route("/register", post(register))
@@ -119,60 +110,51 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .with_state(pool);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, app).await?;
 
-async fn login(
-    State(pool): State<PgPool>,
-    Json(payload): Json<UserProvidedInfo>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let user = match User::find_by_username(payload.username, pool.clone())
-        .await
-        .unwrap()
-    {
-        Some(user) => user,
-        None => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Wrong username or password".to_string(),
-            ));
-        }
-    };
-
-    user.verify_password(&payload.password.into_bytes())
-        .await
-        .unwrap();
-
-    Ok(Json(json!(user)))
+    Ok(())
 }
 
 async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<UserProvidedInfo>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> axum::response::Result<Json<Value>> {
     let phc = hash_password(&payload.password).unwrap();
 
     // TODO: Sanitization of payload
-    User::create(payload.username, phc, pool)
-        .await
-        .map_err(internal_error)
-        .map(|user| Json(json!(user)))
+    Ok(Json(json!(
+        User::create(payload.username, phc, pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    )))
 }
 
-fn hash_password(password: &str) -> Result<String, password_hash::Error> {
+async fn login(
+    State(pool): State<PgPool>,
+    Json(payload): Json<UserProvidedInfo>,
+) -> axum::response::Result<Json<Value>> {
+    let user = User::find_by_username(payload.username, pool.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(user) = &user {
+        user.verify_password(payload.password.as_bytes())
+            .await
+            .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    }
+
+    match user {
+        Some(user) => Ok(Json(json!(user))),
+        None => Err("Nobody to be found".into()),
+    }
+}
+
+fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default(); // TODO: Tune params
-    Ok(argon2
-        .hash_password(password.as_bytes(), &salt)?
-        .to_string())
-}
-
-// Utility function for mapping any error into a `500 Internal Server Error` response.
-// from https://github.com/tokio-rs/axum/blob/main/examples/sqlx-postgres/src/main.rs
-fn internal_error<E>(err: E) -> (StatusCode, String)
-where
-    E: std::error::Error,
-{
-    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+    let hashed_password = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| format!("hashed pasword error: {:}", e))?;
+    Ok(hashed_password.to_string())
 }
