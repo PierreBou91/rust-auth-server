@@ -5,11 +5,15 @@ use argon2::{
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
 
-// private struct to avoid exposing the password hash to the web server.
+/// Dummy PHC hash used to equalize timing when the user does not exist.
+const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$pmcRQCyDK/zHE03SpG7d2A$/204Eb0JCZ72yrZ+CUFRCv0X91nkLyNix8lQxRFyD5g";
+
+// Private DB model (never exposed outside this module)
 #[derive(sqlx::FromRow)]
 struct User {
     id: Uuid,
@@ -21,9 +25,9 @@ struct User {
 
 impl User {
     async fn find_by_username(username: &str, pool: &PgPool) -> Result<Option<Self>> {
-        let optional_user = sqlx::query_as::<_, User>(
+        let user = sqlx::query_as::<_, User>(
             r#"
-            SELECT *
+            SELECT id, username, pass_hash, created_at, updated_at
             FROM users
             WHERE username = $1
             "#,
@@ -32,13 +36,7 @@ impl User {
         .fetch_optional(pool)
         .await?;
 
-        Ok(optional_user)
-    }
-
-    async fn verify_password(&self, password: &[u8]) -> Result<()> {
-        let parsed = PasswordHash::new(&self.pass_hash)?;
-        Argon2::default().verify_password(password, &parsed)?;
-        Ok(())
+        Ok(user)
     }
 }
 
@@ -61,14 +59,15 @@ impl From<User> for UserPublic {
     }
 }
 
+#[instrument(skip(password, pool))]
 pub async fn create_user(username: &str, password: &str, pool: &PgPool) -> Result<UserPublic> {
-    let phc = hash_password(password)?;
+    let phc = hash_password_async(password.to_string()).await?;
 
     let user = sqlx::query_as::<_, User>(
         r#"
         INSERT INTO users (username, pass_hash)
         VALUES ($1, $2)
-        RETURNING *
+        RETURNING id, username, pass_hash, created_at, updated_at
         "#,
     )
     .bind(username)
@@ -80,18 +79,27 @@ pub async fn create_user(username: &str, password: &str, pool: &PgPool) -> Resul
     Ok(UserPublic::from(user))
 }
 
+#[instrument(skip(password, pool))]
 pub async fn authenticate_user(
     username: &str,
     password: &str,
     pool: &PgPool,
 ) -> Result<UserPublic> {
-    let user = User::find_by_username(username, pool)
-        .await?
-        .ok_or(Error::WrongCredentials)?;
+    let user_opt = User::find_by_username(username, pool).await?;
 
-    user.verify_password(password.as_bytes())
-        .await
-        .map_err(|_| Error::WrongCredentials)?;
+    // Always run verification to equalize timing
+    let phc: String = match &user_opt {
+        Some(user) => user.pass_hash.clone(),
+        None => DUMMY_HASH.to_string(),
+    };
+
+    let verify_result = verify_password_async(phc, password.as_bytes().to_vec()).await;
+
+    let Some(user) = user_opt else {
+        return Err(Error::WrongCredentials);
+    };
+
+    verify_result.map_err(|_| Error::WrongCredentials)?;
 
     Ok(UserPublic::from(user))
 }
@@ -108,7 +116,35 @@ fn map_unique_violation(e: sqlx::Error) -> Error {
 
 fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default(); // TODO: Tune params
+    let argon2 = Argon2::default(); // TODO: Fix argon2 params
     let hashed_password = argon2.hash_password(password.as_bytes(), &salt)?;
     Ok(hashed_password.to_string())
+}
+
+pub async fn hash_password_async(password: String) -> Result<String> {
+    let phc = tokio::task::spawn_blocking(move || hash_password(&password)).await??;
+    Ok(phc)
+}
+
+fn verify_password(phc: &str, password: &[u8]) -> Result<()> {
+    let parsed = PasswordHash::new(phc)?;
+    Argon2::default().verify_password(password, &parsed)?;
+    Ok(())
+}
+
+async fn verify_password_async(phc: String, password: Vec<u8>) -> Result<()> {
+    tokio::task::spawn_blocking(move || verify_password(&phc, &password)).await??;
+    Ok(())
+}
+
+pub async fn health_check(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        SELECT 1
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(())
 }

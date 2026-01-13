@@ -1,4 +1,5 @@
-RUST_LOG := "debug"
+# RUST_LOG := "debug"
+RUST_LOG := "warn,server=debug"
 
 alias w := watch
 

@@ -1,18 +1,25 @@
 use std::time::Duration;
 
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
 
+mod config;
 mod error;
 mod handlers;
 mod session;
+mod state;
 mod user;
 
 use crate::{
+    config::Config,
     error::Result,
-    handlers::{login, register},
+    handlers::{health_check, login, register},
+    state::AuthServerState,
     user::UserPublic,
 };
 
@@ -29,26 +36,28 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // TODO: Remove hardcoded DB url
-    // TODO: Retry and log if connection fails
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
+    let config = Config::from_env();
 
     // TODO: retry and log if connection fails
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(config.max_db_connections)
         .acquire_timeout(Duration::from_secs(3))
-        .connect(&db_url)
+        .connect(&config.database_url)
         .await?;
+
+    let state = AuthServerState { pool };
 
     let app = Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/health", get(health_check))
         .layer(TraceLayer::new_for_http())
-        .with_state(pool);
+        .with_state(state);
 
     // TODO: retry and log if listener fails
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    let listener =
+        tokio::net::TcpListener::bind(format!("{:}:{:}", config.server_host, config.server_port))
+            .await?;
     // TODO: retry and log if serve fails
     axum::serve(listener, app).await?;
 
