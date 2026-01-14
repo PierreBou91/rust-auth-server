@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use argon2::ParamsBuilder;
 use axum::{
     Router,
     routing::{get, post},
@@ -29,6 +30,8 @@ struct UserProvidedInfo {
     password: String,
 }
 
+type AppState = Arc<AuthServerState>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // RUST_LOG=debug cargo run
@@ -38,6 +41,17 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env();
 
+    let mut builder = ParamsBuilder::new();
+    let argon_params = builder
+        .m_cost(config.argon2_memory)
+        .t_cost(config.argon2_iteration)
+        .p_cost(config.argon2_parallelism)
+        .output_len(32)
+        .build()
+        .unwrap();
+
+    // let argon = Argon2::from(argon_param);
+
     // TODO: retry and log if connection fails
     let pool = PgPoolOptions::new()
         .max_connections(config.max_db_connections)
@@ -45,7 +59,7 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await?;
 
-    let state = AuthServerState { pool };
+    let state: AppState = Arc::new(AuthServerState { pool, argon_params });
 
     let app = Router::new()
         .route("/register", post(register))

@@ -1,5 +1,5 @@
 use argon2::{
-    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier,
     password_hash::{SaltString, rand_core::OsRng},
 };
 use chrono::{DateTime, Utc};
@@ -60,8 +60,13 @@ impl From<User> for UserPublic {
 }
 
 #[instrument(skip(password, pool))]
-pub async fn create_user(username: &str, password: &str, pool: &PgPool) -> Result<UserPublic> {
-    let phc = hash_password_async(password.to_string()).await?;
+pub async fn create_user(
+    username: &str,
+    password: &str,
+    pool: &PgPool,
+    argon_params: Params,
+) -> Result<UserPublic> {
+    let phc = hash_password_async(password.to_string(), argon_params).await?;
 
     let user = sqlx::query_as::<_, User>(
         r#"
@@ -114,20 +119,25 @@ fn map_unique_violation(e: sqlx::Error) -> Error {
     Error::Sqlx(e)
 }
 
-fn hash_password(password: &str) -> Result<String> {
+fn hash_password(password: &str, argon_params: Params) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default(); // TODO: Fix argon2 params
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon_params,
+    );
     let hashed_password = argon2.hash_password(password.as_bytes(), &salt)?;
     Ok(hashed_password.to_string())
 }
 
-pub async fn hash_password_async(password: String) -> Result<String> {
-    let phc = tokio::task::spawn_blocking(move || hash_password(&password)).await??;
+pub async fn hash_password_async(password: String, argon_params: Params) -> Result<String> {
+    let phc = tokio::task::spawn_blocking(move || hash_password(&password, argon_params)).await??;
     Ok(phc)
 }
 
 fn verify_password(phc: &str, password: &[u8]) -> Result<()> {
     let parsed = PasswordHash::new(phc)?;
+    // Params are not required for the verification because they are extracted from the phc
     Argon2::default().verify_password(password, &parsed)?;
     Ok(())
 }
