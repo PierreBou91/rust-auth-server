@@ -8,6 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
+use tracing::debug;
 
 mod config;
 mod error;
@@ -72,6 +73,9 @@ async fn main() -> Result<()> {
     let listener =
         tokio::net::TcpListener::bind(format!("{:}:{:}", config.server_host, config.server_port))
             .await?;
+
+    debug!("Listening on localhost:{:}", config.server_port);
+
     // TODO: retry and log if serve fails
     axum::serve(listener, app).await?;
 

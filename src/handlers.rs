@@ -1,3 +1,5 @@
+use crate::session::Session;
+
 use super::*;
 
 use axum::{Json, extract::State, http::StatusCode};
@@ -26,12 +28,13 @@ pub async fn register(
 pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<UserProvidedInfo>,
-) -> axum::response::Result<Json<UserPublic>> {
+) -> axum::response::Result<Json<Vec<u8>>> {
     tracing::debug!("login attempt");
     let user = user::authenticate_user(&payload.username, &payload.password, &state.pool).await?;
-
     tracing::debug!("login success");
-    Ok(Json(user))
+    tracing::debug!("create session attemp");
+    let sess = session::create_session(&user.id, &state.pool).await?;
+    Ok(Json(sess))
 }
 
 #[instrument(skip(state))]

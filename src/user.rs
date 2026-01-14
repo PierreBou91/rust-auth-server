@@ -42,10 +42,10 @@ impl User {
 
 #[derive(Serialize)]
 pub struct UserPublic {
-    id: Uuid,
-    username: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    pub id: Uuid,
+    pub username: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl From<User> for UserPublic {

@@ -3,50 +3,49 @@
 // https://www.youtube.com/watch?v=j-VQCYP6wyw
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
-use derive_more::From;
 use serde_json::json;
+use thiserror::Error;
+use tracing::{error, warn};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, From)]
+#[derive(Debug, Error)]
 pub enum Error {
+    #[error("User already exists")]
     UserAlreadyExists,
+
+    #[error("Wrong credentials")]
     WrongCredentials,
 
-    #[from]
-    Sqlx(sqlx::Error),
+    #[error("Error when accessing the database")]
+    Sqlx(#[from] sqlx::Error),
 
-    #[from]
-    Argon2(argon2::password_hash::Error),
+    #[error("Error hashing password")]
+    Argon2(#[from] argon2::password_hash::Error),
 
-    #[from]
-    Io(std::io::Error),
+    #[error("Error from rand")]
+    OsRng(#[from] rand::rand_core::OsError),
 
-    #[from]
-    TokioJoin(tokio::task::JoinError),
+    #[error("Io error")]
+    Io(#[from] std::io::Error),
+
+    #[error("Error joining Tokio tasks")]
+    TokioJoin(#[from] tokio::task::JoinError),
 }
 
-impl std::error::Error for Error {}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // You can improve this later (thiserror), but this is fine for now.
-        write!(f, "{self:?}")
+impl Error {
+    fn log(&self) {
+        match self {
+            Error::UserAlreadyExists => warn!(error = %self, "client error"),
+            Error::WrongCredentials => warn!(error = %self, "client error"),
+            _ => error!(error = %self, details = ?self, "server error"),
+        }
     }
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
-        // Log internal details (server-side)
-        match &self {
-            Error::Sqlx(e) => tracing::error!(error = ?e, "db error"),
-            Error::Argon2(e) => tracing::error!(error = ?e, "argon2 error"),
-            Error::Io(e) => tracing::error!(error = ?e, "io error"),
-            Error::TokioJoin(e) => tracing::error!(error = ?e, "tokio join error"),
-            _ => tracing::warn!(error = ?self, "request failed"),
-        }
-
-        // Return safe messages to clients
+        self.log();
         match self {
             Error::UserAlreadyExists => (
                 StatusCode::CONFLICT,
@@ -60,7 +59,11 @@ impl IntoResponse for Error {
             )
                 .into_response(),
 
-            Error::Sqlx(_) | Error::Argon2(_) | Error::Io(_) | Error::TokioJoin(_) => (
+            Error::OsRng(_)
+            | Error::Sqlx(_)
+            | Error::Argon2(_)
+            | Error::Io(_)
+            | Error::TokioJoin(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal server error" })),
             )
