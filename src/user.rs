@@ -109,6 +109,25 @@ pub async fn authenticate_user(
     Ok(UserPublic::from(user))
 }
 
+#[instrument(skip(pool))]
+pub async fn find_user_by_id(id: &Uuid, pool: &PgPool) -> Result<UserPublic> {
+    let user_opt = sqlx::query_as::<_, User>(
+        r#"
+            SELECT id, username, pass_hash, created_at, updated_at
+            FROM users
+            WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    match user_opt {
+        Some(user) => Ok(UserPublic::from(user)),
+        None => Err(Error::Unauthenticated),
+    }
+}
+
 fn map_unique_violation(e: sqlx::Error) -> Error {
     if let sqlx::Error::Database(db_err) = &e {
         // Postgres unique_violation is SQLSTATE 23505

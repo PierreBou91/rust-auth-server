@@ -17,6 +17,9 @@ pub enum Error {
     #[error("Wrong credentials")]
     WrongCredentials,
 
+    #[error("Unauthenticated")]
+    Unauthenticated,
+
     #[error("Error when accessing the database")]
     Sqlx(#[from] sqlx::Error),
 
@@ -31,6 +34,9 @@ pub enum Error {
 
     #[error("Error joining Tokio tasks")]
     TokioJoin(#[from] tokio::task::JoinError),
+
+    #[error("Error decoding session id")]
+    DecodeError(#[from] base64::DecodeError),
 }
 
 impl Error {
@@ -59,10 +65,17 @@ impl IntoResponse for Error {
             )
                 .into_response(),
 
+            Error::Unauthenticated => (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthenticated"})),
+            )
+                .into_response(),
+
             Error::OsRng(_)
             | Error::Sqlx(_)
             | Error::Argon2(_)
             | Error::Io(_)
+            | Error::DecodeError(_)
             | Error::TokioJoin(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal server error" })),

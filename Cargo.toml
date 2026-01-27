@@ -24,3 +24,4 @@ argon2 = { version = "0.5.3", features = ["std"] }
 thiserror = "2.0.17"
 rand = "0.9.2"
 sha2 = "0.10.9"
+base64 = "0.22.1"

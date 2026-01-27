@@ -1,4 +1,5 @@
 pub struct Config {
+    pub env: String,
     pub database_url: String,
     pub server_host: String,
     pub server_port: u16,
@@ -12,6 +13,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Config {
+            env: std::env::var("ENV").unwrap_or_else(|_| "PROD".into()),
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".into()),
             server_host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),

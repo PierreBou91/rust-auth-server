@@ -20,7 +20,7 @@ mod user;
 use crate::{
     config::Config,
     error::Result,
-    handlers::{health_check, login, register},
+    handlers::{health_check, login, me, register},
     state::AuthServerState,
     user::UserPublic,
 };
@@ -60,12 +60,22 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await?;
 
-    let state: AppState = Arc::new(AuthServerState { pool, argon_params });
+    let env = match config.env.to_uppercase().as_str() {
+        "DEV" => state::Env::Dev,
+        _ => state::Env::Prod,
+    };
+
+    let state: AppState = Arc::new(AuthServerState {
+        env,
+        pool,
+        argon_params,
+    });
 
     let app = Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/health", get(health_check))
+        .route("/me", get(me))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

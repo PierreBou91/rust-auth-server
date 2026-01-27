@@ -1,12 +1,11 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use rand::{TryRngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::Result;
-#[derive(Serialize, Deserialize, sqlx::FromRow)]
+#[derive(sqlx::FromRow)]
 pub struct Session {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -16,23 +15,15 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
-// CREATE TABLE sessions (
-//     id UUID PRIMARY KEY DEFAULT uuidv7(),
-//     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-//     token_hash BYTEA NOT NULL UNIQUE,
-//     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//     expires_at TIMESTAMPTZ NOT NULL,
-//     revoked_at TIMESTAMPTZ
-// )
-pub async fn create_session(user_id: &Uuid, pool: &PgPool) -> Result<Vec<u8>> {
+
+pub async fn create_session(
+    user_id: &Uuid,
+    pool: &PgPool,
+) -> Result<(Vec<u8>, chrono::DateTime<Utc>)> {
     // generate token
     let mut token = [0u8; 32];
     OsRng.try_fill_bytes(&mut token)?;
-    let mut hasher = Sha256::new();
-    hasher.update(token);
-    let tmp = hasher.finalize();
-    let hashed_session_token = tmp.as_slice();
+    let hashed_session_token = hash_token(&token);
     let now = Utc::now();
     let days = TimeDelta::days(5);
     let then = now + days;
@@ -49,27 +40,51 @@ pub async fn create_session(user_id: &Uuid, pool: &PgPool) -> Result<Vec<u8>> {
     .fetch_one(pool)
     .await?;
     // return token to caller
-    Ok(session.token_hash)
+    Ok((token.to_vec(), session.expires_at))
 }
 
-pub async fn find_session_by_token(
-    session_token: &Vec<u8>,
-    pool: &PgPool,
-) -> Result<Option<Session>> {
+pub async fn find_session_by_token(session_token: &[u8], pool: &PgPool) -> Result<Option<Session>> {
+    let hashed_session_token = hash_token(session_token);
+
     let session = sqlx::query_as::<_, Session>(
         r#"
             SELECT id, user_id, token_hash, created_at, last_seen_at, expires_at, revoked_at
             FROM sessions
-            WHERE token_hash == $1
+            WHERE token_hash = $1
             "#,
     )
-    .bind(session_token)
-    .fetch_one(pool)
+    .bind(&hashed_session_token)
+    .fetch_optional(pool)
     .await?;
-    Ok(Some(session))
+
+    let now = Utc::now();
+
+    if let Some(sess) = session {
+        if sess.expires_at < now || sess.revoked_at.is_some() {
+            return Ok(None);
+        }
+
+        if sess.last_seen_at < now - TimeDelta::minutes(15) {
+            sqlx::query(
+                r#"
+                        UPDATE sessions
+                        SET last_seen_at = $1, expires_at = $2
+                        WHERE token_hash = $3
+                        "#,
+            )
+            .bind(now)
+            .bind(now + TimeDelta::days(5))
+            .bind(&hashed_session_token)
+            .execute(pool)
+            .await?;
+        }
+        Ok(Some(sess))
+    } else {
+        Ok(None)
+    }
 }
 
-pub async fn revoke_session(session_id: &str, pool: &PgPool) -> Result<()> {
+pub async fn revoke_session(session_id: &Uuid, pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"
             UPDATE sessions
@@ -81,4 +96,11 @@ pub async fn revoke_session(session_id: &str, pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+fn hash_token(token: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(token);
+    let tmp = hasher.finalize();
+    tmp.as_slice().to_owned()
 }
