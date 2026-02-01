@@ -1,20 +1,8 @@
+use crate::{crypto::token::hash_token, error::Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use rand::{TryRngCore, rngs::OsRng};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-use crate::error::Result;
-#[derive(sqlx::FromRow)]
-pub struct Session {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub token_hash: Vec<u8>,
-    pub created_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub revoked_at: Option<DateTime<Utc>>,
-}
 
 pub async fn create_session(
     user_id: &Uuid,
@@ -96,11 +84,4 @@ pub async fn revoke_session(session_id: &Uuid, pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
-}
-
-fn hash_token(token: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(token);
-    let tmp = hasher.finalize();
-    tmp.as_slice().to_owned()
 }

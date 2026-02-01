@@ -40,12 +40,3 @@ impl Config {
         }
     }
 }
-
-// let mut builder = ParamsBuilder::new();
-// let argon_param = builder
-//     .m_cost(19456)
-//     .t_cost(2)
-//     .p_cost(1)
-//     .output_len(32)
-//     .build()
-//     .unwrap();

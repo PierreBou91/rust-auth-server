@@ -1,37 +1,16 @@
 use std::{sync::Arc, time::Duration};
 
 use argon2::ParamsBuilder;
-use axum::{
-    Router,
-    routing::{get, post},
-};
-use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgPoolOptions;
-use tower_http::trace::TraceLayer;
-use tracing::debug;
 
-mod config;
-mod error;
-mod handlers;
-mod session;
-mod state;
-mod user;
-
-use crate::{
+use server::{
+    app::{self, AppState, state},
     config::Config,
     error::Result,
-    handlers::{health_check, login, me, register},
-    state::AuthServerState,
-    user::UserPublic,
+    repo::pg_user::PgUserRepo,
+    service::user::UserService,
 };
-
-#[derive(Serialize, Deserialize)]
-struct UserProvidedInfo {
-    username: String,
-    password: String,
-}
-
-type AppState = Arc<AuthServerState>;
+use sqlx::postgres::PgPoolOptions;
+use tracing::debug;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,8 +30,6 @@ async fn main() -> Result<()> {
         .build()
         .unwrap();
 
-    // let argon = Argon2::from(argon_param);
-
     // TODO: retry and log if connection fails
     let pool = PgPoolOptions::new()
         .max_connections(config.max_db_connections)
@@ -65,19 +42,13 @@ async fn main() -> Result<()> {
         _ => state::Env::Prod,
     };
 
-    let state: AppState = Arc::new(AuthServerState {
-        env,
-        pool,
-        argon_params,
-    });
+    let repo = Arc::new(PgUserRepo { pool });
 
-    let app = Router::new()
-        .route("/register", post(register))
-        .route("/login", post(login))
-        .route("/health", get(health_check))
-        .route("/me", get(me))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let user_service = Arc::new(UserService::new(repo, argon_params));
+
+    let state = AppState { env, user_service };
+
+    let app = app::init_router(state);
 
     // TODO: retry and log if listener fails
     let listener =
